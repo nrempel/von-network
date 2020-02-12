@@ -1,23 +1,24 @@
 import asyncio
 import base64
-from datetime import date, datetime
-from enum import IntEnum
 import json
-from hashlib import sha256
 import logging
 import os
+import tempfile
+
+from datetime import date, datetime
+from enum import IntEnum
+from hashlib import sha256
 from pathlib import Path
 from typing import Sequence
-import tempfile
 
 import aiohttp
 import aiosqlite
 import base58
+import nacl.encoding
+import nacl.signing
 
-from indy import ledger, pool
-from indy.error import IndyError
-from plenum.common.signer_simple import SimpleSigner
-from stp_core.crypto.nacl_wrappers import SigningKey
+import indy_vdr
+from indy_vdr import ledger, Pool, VdrError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ INDY_TXN_TYPES = {
     "5": "TXN_AUTHOR_AGREEMENT_AML",
     "6": "GET_TXN_AUTHOR_AGREEMENT",
     "7": "GET_TXN_AUTHOR_AGREEMENT_AML",
+    "8": "DISABLE_ALL_TXN_AUTHR_AGRMTS",
     "100": "ATTRIB",
     "101": "SCHEMA",
     "102": "CRED_DEF",
@@ -63,17 +65,11 @@ MAX_FETCH = int(os.getenv("MAX_FETCH", "50000"))
 # Sets the time between transaction fetches (updates); in seconds.
 RESYNC_TIME = int(os.getenv("RESYNC_TIME", "120"))
 
-GENESIS_FILE = (
-    os.getenv("GENESIS_FILE") or "/home/indy/ledger/sandbox/pool_transactions_genesis"
-)
+GENESIS_FILE = os.getenv("GENESIS_FILE") or "/home/indy/genesis.txn"
 GENESIS_URL = os.getenv("GENESIS_URL")
 GENESIS_VERIFIED = False
 
-ANONYMOUS = os.getenv("ANONYMOUS")
-ANONYMOUS = bool(ANONYMOUS and ANONYMOUS != "0" and ANONYMOUS.lower() != "false")
 LEDGER_SEED = os.getenv("LEDGER_SEED")
-if not LEDGER_SEED and not ANONYMOUS:
-    LEDGER_SEED = "000000000000000000000000Trustee1"
 
 REGISTER_NEW_DIDS = os.getenv("REGISTER_NEW_DIDS", False)
 REGISTER_NEW_DIDS = bool(
@@ -175,7 +171,7 @@ class NotReadyException(AnchorException):
 
 class AnchorHandle:
     def __init__(self, protocol: str = None):
-        self._anonymous = ANONYMOUS
+        self._anonymous = not LEDGER_SEED
         self._cache = None
         self._aml_config_path = AML_CONFIG
         self._did = None
@@ -184,8 +180,8 @@ class AnchorHandle:
         self._protocol = protocol or DEFAULT_PROTOCOL
         self._ready = False
         self._ledger_lock = None
-        self._register_dids = REGISTER_NEW_DIDS and not ANONYMOUS
-        self._seed = seed_as_bytes(LEDGER_SEED)
+        self._register_dids = REGISTER_NEW_DIDS and LEDGER_SEED
+        self._seed = seed_as_bytes(LEDGER_SEED) if LEDGER_SEED else None
         self._sync_lock = None
         self._syncing = False
         self._taa_accept = None
@@ -193,33 +189,13 @@ class AnchorHandle:
         self._verkey = None
 
     async def _open_pool(self):
-        pool_name = "nodepool"
-        pool_cfg = {}
         self._pool = None
-
         try:
-            await pool.set_protocol_version(self._protocol)
-        except IndyError as e:
-            raise AnchorException("Error setting pool protocol version") from e
-
-        # remove existing pool config by the same name in ledger browser mode
-        try:
-            pool_names = {cfg["pool"] for cfg in await pool.list_pools()}
-            if pool_name in pool_names:
-                await pool.delete_pool_ledger_config(pool_name)
-        except IndyError as e:
-            raise AnchorException("Error deleting existing pool configuration") from e
-
-        try:
-            await pool.create_pool_ledger_config(
-                pool_name, json.dumps({"genesis_txn": await resolve_genesis_file()})
-            )
-        except IndyError as e:
-            raise AnchorException("Error creating pool configuration") from e
-
-        try:
-            self._pool = await pool.open_pool_ledger(pool_name, json.dumps(pool_cfg))
-        except IndyError as e:
+            indy_vdr.set_protocol_version(self._protocol)
+            self._pool = Pool(genesis_path=await resolve_genesis_file())
+            status = await self._pool.refresh()
+            LOGGER.info("Finished pool refresh: %s", status)
+        except VdrError as e:
             raise AnchorException("Error opening pool ledger connection") from e
 
     async def _register_txn_agreement(self):
@@ -247,17 +223,17 @@ class AnchorHandle:
             raise AnchorException("Invalid TAA configuration")
 
         aml_methods = {}
-        get_aml_req = await ledger.build_get_acceptance_mechanisms_request(
+        get_aml_req = ledger.build_get_acceptance_mechanisms_request(
             self._did, None, None
         )
         response = await self.submit_request(get_aml_req, True)
-        aml_found = response["result"]["data"]
+        aml_found = response["data"]
         aml_methods = aml_found and aml_found["aml"]
 
         if aml_config:
             if not aml_found or aml_found["version"] != aml_config["version"]:
                 aml_body = json.dumps(aml_config["aml"])
-                set_aml_req = await ledger.build_acceptance_mechanisms_request(
+                set_aml_req = ledger.build_acceptance_mechanisms_request(
                     self._did,
                     aml_body,
                     aml_config["version"],
@@ -270,11 +246,9 @@ class AnchorHandle:
                 LOGGER.info("AML already published: %s", aml_config["version"])
 
         taa_plaintext = None
-        get_taa_req = await ledger.build_get_txn_author_agreement_request(
-            self._did, None
-        )
+        get_taa_req = ledger.build_get_txn_author_agreement_request(self._did, None)
         response = await self.submit_request(get_taa_req, True)
-        taa_found = response["result"]["data"]
+        taa_found = response["data"]
         taa_plaintext = (
             taa_found
             and taa_found["text"]
@@ -283,7 +257,7 @@ class AnchorHandle:
 
         if taa_config:
             if not taa_found or taa_found["version"] != taa_config["version"]:
-                set_taa_req = await ledger.build_txn_author_agreement_request(
+                set_taa_req = ledger.build_txn_author_agreement_request(
                     self._did, taa_config["text"], taa_config["version"]
                 )
                 await self.submit_request(set_taa_req, True)
@@ -334,9 +308,7 @@ class AnchorHandle:
 
     async def close(self):
         self._ready = False
-        if self._pool:
-            await pool.close_pool_ledger(self._pool)
-            self._pool = None
+        self._pool = None
         await self._cache.close()
 
     @property
@@ -363,6 +335,12 @@ class AnchorHandle:
                 return
             return await self.get_txn(ledger_type, latest, True, True)
 
+    async def get_genesis(self) -> str:
+        if not self.ready:
+            raise NotReadyException()
+        txns = await self._pool.get_transactions()
+        return txns
+
     async def get_latest_seqno(self, ledger_type):
         ledger_type = LedgerType.for_value(ledger_type)
         return await self._cache.get_latest_seqno(ledger_type)
@@ -372,54 +350,53 @@ class AnchorHandle:
         return await self._cache.get_max_seqno(ledger_type)
 
     async def submit_request(
-        self, req_json: str, signed: bool = False, apply_taa=False
+        self,
+        req: ledger.Request,
+        signed: bool = False,
+        apply_taa: bool = False,
+        as_action: bool = False,
     ):
         try:
-            if signed:
+            if signed or as_action:
                 if not self._did:
                     raise AnchorException("Cannot sign request: no DID")
-                req = json.loads(req_json)
-                if apply_taa and self._taa_accept:
-                    req["taaAcceptance"] = self._taa_accept
-                signer = SimpleSigner(self._did, self._seed)
-                req["signature"] = signer.sign(req)
-                req_json = json.dumps(req)
-            rv_json = await ledger.submit_request(self._pool, req_json)
-            await asyncio.sleep(0)
-        except IndyError as e:
+                # if apply_taa and self._taa_accept:
+                #     req["taaAcceptance"] = self._taa_accept
+                key = nacl.signing.SigningKey(self._seed)
+                signed = key.sign(req.signature_input)
+                req.set_signature(signed.signature)
+            if as_action:
+                resp = await self._pool.submit_action(req)
+            else:
+                resp = await self._pool.submit_request(req)
+        except VdrError as e:
             raise AnchorException("Error submitting ledger transaction request") from e
-
-        resp = json.loads(rv_json)
-        if resp.get("op", "") in ("REQNACK", "REJECT"):
-            raise AnchorException(
-                "Ledger rejected transaction request: {}".format(resp["reason"])
-            )
 
         return resp
 
     async def get_nym(self, did: str):
         """
-    Fetch a nym from the ledger
-    """
+        Fetch a nym from the ledger
+        """
         if not self.ready:
             raise NotReadyException()
 
-        get_nym_req = await ledger.build_get_nym_request(self._did, did)
+        get_nym_req = ledger.build_get_nym_request(self._did, did)
         response = await self.submit_request(get_nym_req, True)
         rv = {}
 
-        data_json = response["result"]["data"]  # it's double-encoded on the ledger
+        data_json = response["data"]  # it's double-encoded on the ledger
         if data_json:
             rv = json.loads(data_json)
         return rv
 
     def _txn2data(self, txn: dict):
-        return json.dumps((txn["result"].get("data", {}) or {}).get("txn", {}))
+        return json.dumps((txn.get("data", {}) or {}).get("txn", {}))
 
     async def get_txn(self, ledger_type, ident, cache=True, latest=False):
         """
-    Fetch a transaction by sequence number or transaction ID
-    """
+        Fetch a transaction by sequence number or transaction ID
+        """
         ledger_type = LedgerType.for_value(ledger_type)
         if not self.ready:
             raise NotReadyException()
@@ -436,18 +413,16 @@ class AnchorHandle:
             return None
 
         LOGGER.debug("Fetch %s %s", ledger_type, ident)
-        req_json = await ledger.build_get_txn_request(
-            self.did, ledger_type.name, int(ident)
-        )
+        request = ledger.build_get_txn_request(self.did, ledger_type.name, int(ident))
         try:
-            txn = await self.submit_request(req_json, False)
+            txn = await self.submit_request(request, False)
         except AnchorException as e:
             raise AnchorException(
                 "Exception when fetching transaction {}/{}".format(
                     ledger_type.name, ident
                 )
             ) from e
-        txn_data = txn["result"].get("data", {}) or {}
+        txn_data = txn.get("data", {}) or {}
 
         if txn_data and txn_data.get("txn"):
             body_json = json.dumps(txn_data, separators=(",", ":"), sort_keys=True)
@@ -492,8 +467,8 @@ class AnchorHandle:
 
     async def register_did(self, did, verkey, alias=None, role=None):
         """
-    Register a DID and verkey on the ledger
-    """
+        Register a DID and verkey on the ledger
+        """
         if not self.ready or not self.did:
             raise NotReadyException()
 
@@ -501,17 +476,17 @@ class AnchorHandle:
         LOGGER.info("Get nym: %s", did)
         if not await self.get_nym(did):
             LOGGER.info("Send nym: %s/%s", did, verkey)
-            req_json = await ledger.build_nym_request(
+            request = ledger.build_nym_request(
                 self.did, did, verkey, alias or None, role
             )
-            await self.submit_request(req_json, True, True)
+            await self.submit_request(request, True, True)
 
     async def seed_to_did(self, seed):
         """
         Resolve a DID and verkey from a seed
         """
         seed = seed_as_bytes(seed)
-        vk = bytes(SigningKey(seed).verify_key)
+        vk = bytes(nacl.signing.SigningKey(seed).verify_key)
         did = base58.b58encode(vk[:16]).decode("ascii")
         verkey = base58.b58encode(vk).decode("ascii")
         return (did, verkey)
@@ -613,23 +588,26 @@ class AnchorHandle:
 
     async def validator_info(self):
         """
-    Fetch the status of the validator nodes
-    """
+        Fetch the status of the validator nodes
+        """
         if not self.ready or not self.did:
             raise NotReadyException()
 
-        req_json = await ledger.build_get_validator_info_request(self.did)
-        node_data = await self.submit_request(req_json, True)
+        request = ledger.build_get_validator_info_request(self.did)
+        node_data = await self.submit_request(request, as_action=True)
         node_aliases = list(node_data.keys())
         node_aliases.sort()
 
         ret = []
         for node in node_aliases:
             reply = json.loads(node_data[node])
-            if "result" not in reply:
-                continue
-            data = reply["result"].get("data")
-            data["Node_info"]["Name"] = node
+            if "result" in reply:
+                data = reply["result"]["data"]
+                data["Node_info"]["Name"] = node
+            elif "reason" in reply:
+                data = {"name": node, "error": reply["reason"]}
+            else:
+                data = {"name": node, "error": "unknown error"}
             ret.append(data)
         return ret
 
@@ -762,28 +740,28 @@ class LedgerCache:
         LOGGER.info("Initializing transaction database")
         await self.perform(
             """
-      CREATE TABLE existent (
-        ledger integer PRIMARY KEY,
-        seqno integer NOT NULL DEFAULT 0
-      );
-      CREATE TABLE latest (
-        ledger integer PRIMARY KEY,
-        seqno integer NOT NULL DEFAULT 0
-      );
-      CREATE TABLE transactions (
-        ledger integer NOT NULL,
-        seqno integer NOT NULL,
-        txntype integer NOT NULL,
-        termsid integer,
-        txnid text,
-        added timestamp,
-        value text,
-        PRIMARY KEY (ledger, seqno)
-      );
-      CREATE INDEX txn_id ON transactions (txnid);
-      CREATE VIRTUAL TABLE terms USING
-        fts3(txnid, sender, ident, alias, verkey, short_verkey, data);
-      """,
+            CREATE TABLE existent (
+                ledger integer PRIMARY KEY,
+                seqno integer NOT NULL DEFAULT 0
+            );
+            CREATE TABLE latest (
+                ledger integer PRIMARY KEY,
+                seqno integer NOT NULL DEFAULT 0
+            );
+            CREATE TABLE transactions (
+                ledger integer NOT NULL,
+                seqno integer NOT NULL,
+                txntype integer NOT NULL,
+                termsid integer,
+                txnid text,
+                added timestamp,
+                value text,
+                PRIMARY KEY (ledger, seqno)
+            );
+            CREATE INDEX txn_id ON transactions (txnid);
+            CREATE VIRTUAL TABLE terms USING
+                fts3(txnid, sender, ident, alias, verkey, short_verkey, data);
+            """,
             script=True,
         )
 
@@ -791,10 +769,10 @@ class LedgerCache:
         LOGGER.info("Resetting ledger cache")
         await self.perform(
             """
-      DELETE FROM existent;
-      DELETE FROM latest;
-      DELETE FROM transactions
-      """,
+            DELETE FROM existent;
+            DELETE FROM latest;
+            DELETE FROM transactions
+            """,
             script=True,
         )
 

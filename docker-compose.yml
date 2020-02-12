@@ -1,11 +1,11 @@
-version: '3'
+version: "3"
 services:
   #
   # Client
   #
   client:
     image: von-network-base
-    command: 'bash -c ''./scripts/start_client.sh'''
+    command: indy-cli
     environment:
       - IP=${IP}
       - IPS=${IPS}
@@ -21,11 +21,10 @@ services:
   # Webserver
   #
   webserver:
-    image: von-network-base
-    command: 'bash -c ''sleep 10; ./scripts/start_webserver.sh;'''
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
     environment:
-      - IP=${IP}
-      - IPS=${IPS}
       - DOCKERHOST=${DOCKERHOST}
       - LOG_LEVEL=${LOG_LEVEL}
       - RUST_LOG=${RUST_LOG}
@@ -47,15 +46,13 @@ services:
     volumes:
       - ./config:/home/indy/config
       - ./server:/home/indy/server
-      - webserver-cli:/home/indy/.indy-cli
-      - webserver-ledger:/home/indy/ledger
 
   #
   # Synchronization test
   #
   synctest:
     image: von-network-base
-    command: 'bash -c ''./scripts/start_synctest.sh'''
+    command: "bash -c './scripts/start_synctest.sh'"
     environment:
       - IP=${IP}
       - IPS=${IPS}
@@ -66,18 +63,13 @@ services:
       - von
     ports:
       - ${WEB_SERVER_HOST_PORT:-9000}:8000
-    volumes:
-      - ./config:/home/indy/config
-      - ./server:/home/indy/server
-      - webserver-cli:/home/indy/.indy-cli
-      - webserver-ledger:/home/indy/ledger
 
   #
   # Nodes
   #
   nodes:
     image: von-network-base
-    command: 'bash -c ''./scripts/start_nodes.sh'''
+    command: "bash -c './scripts/start_nodes.sh'"
     networks:
       - von
     ports:
@@ -100,7 +92,7 @@ services:
 
   node1:
     image: von-network-base
-    command: 'bash -c ''./scripts/start_node.sh 1'''
+    command: "bash -c './scripts/start_node.sh 1'"
     networks:
       - von
     ports:
@@ -117,7 +109,7 @@ services:
 
   node2:
     image: von-network-base
-    command: 'bash -c ''./scripts/start_node.sh 2'''
+    command: "bash -c './scripts/start_node.sh 2'"
     networks:
       - von
     ports:
@@ -134,7 +126,7 @@ services:
 
   node3:
     image: von-network-base
-    command: 'bash -c ''./scripts/start_node.sh 3'''
+    command: "bash -c './scripts/start_node.sh 3'"
     networks:
       - von
     ports:
@@ -151,7 +143,7 @@ services:
 
   node4:
     image: von-network-base
-    command: 'bash -c ''./scripts/start_node.sh 4'''
+    command: "bash -c './scripts/start_node.sh 4'"
     networks:
       - von
     ports:
@@ -171,8 +163,6 @@ networks:
 
 volumes:
   client-data:
-  webserver-cli:
-  webserver-ledger:
   node1-data:
   node2-data:
   node3-data:

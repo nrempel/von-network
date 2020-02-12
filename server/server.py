@@ -17,7 +17,6 @@ from .anchor import (
     INDY_ROLE_TYPES,
     INDY_TXN_TYPES,
     REGISTER_NEW_DIDS,
-    get_genesis_file,
 )
 
 logging.basicConfig(level=(os.getenv("LOG_LEVEL", "").upper() or logging.INFO))
@@ -269,8 +268,9 @@ async def ledger_seq(request):
 # Expose genesis transaction for easy connection.
 @ROUTES.get("/genesis")
 async def genesis(request):
-    with open(get_genesis_file(), "r") as content_file:
-        genesis = content_file.read()
+    if not TRUST_ANCHOR.ready:
+        return not_ready()
+    genesis = await TRUST_ANCHOR.get_genesis()
     return web.Response(text=genesis)
 
 
@@ -307,8 +307,9 @@ async def register(request):
         if not did or not verkey:
             return web.Response(
                 text=(
-                  "Either seed the seed parameter or the did and "
-                  "verkey parameters must be provided."),
+                    "Either seed the seed parameter or the did and "
+                    "verkey parameters must be provided."
+                ),
                 status=400,
             )
 
@@ -340,4 +341,3 @@ if __name__ == "__main__":
     LOGGER.info("Running webserver...")
     PORT = int(os.getenv("PORT", "8000"))
     web.run_app(APP, host="0.0.0.0", port=PORT)
-

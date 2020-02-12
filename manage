@@ -53,12 +53,12 @@ usage () {
   dockerhost - Print the ip address of the Docker Host Adapter as it is seen by containers running in docker.
 
   indy-cli - Run Indy-Cli commands in a Indy-Cli container environment.
- 
+
         $0 indy-cli -h
           - Display specific help documentation.
 
   cli - Run a command in an Indy-Cli container.
-        
+
         $0 cli -h
           - Display specific help documentation.
 EOF
@@ -68,20 +68,20 @@ exit 1
 indyCliUsage () {
   cat <<-EOF
 
-  Usage: 
+  Usage:
     $0 [options] indy-cli [-h] [command] [parameters]
-    
+
     Run Indy-Cli commands in a Indy-Cli container environment.
       - Refer to the cli-scripts directory for available scripts and their parameters.
       - Refer to './docs/Writing Transactions to a Ledger for an Un-privileged Author.md' for
         additional examples.
-      
+
     Options:
       -v <FullyQualifiedPathToScripts/>
         - Mount a script volume to the container.  By default the 'cli-scripts' directory is mounted to the container.
 
     Examples:
-    
+
     $0 indy-cli
       - Start an interactive indy-cli session in your Indy-Cli Container.
 EOF
@@ -93,15 +93,15 @@ cliUsage () {
 
   Usage:
     $0 [options] cli [-h] [command]
-    
+
     Run a command in an Indy-Cli container.
 
     Options:
       -v <FullyQualifiedPathToScripts/>
         - Mount a script volume to the container.  By default the 'cli-scripts' directory is mounted to the container.
-    
+
     Examples:
-    
+
     $0 cli reset
       - Reset your Indy-CLI container's environment
 
@@ -187,7 +187,7 @@ function initEnv() {
 
   IP=""
   IPS=""
-  if [ ! -z $(echo ${1} | grep '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}') ]; then 
+  if [ ! -z $(echo ${1} | grep '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}') ]; then
     if [[ $1 == *","* ]]; then
       IPS="$1"
     else
@@ -201,7 +201,7 @@ function initEnv() {
 }
 
 function runCliCommand() {
-  
+
   unset displayCliUsage
   for arg in "$@"; do
     # Remove recognized arguments from the list after processing.
@@ -250,7 +250,7 @@ function runCliCommand() {
 
   # Need to escape quotes and commas so they don't get removed along the way ...
   escapedArgs=$(echo $@ | sed "s~'~\\\'~g" | sed 's~\"~\\"~g')
-  
+
   # Quote the escaped args so docker-compose does not try to perform any processing on them ...
   # Separate the command and the args so they don't get treated as one argument by the scripts in the container ...
   cmd+="
@@ -268,7 +268,7 @@ function logs() {
     while getopts ":f-:" FLAG; do
       case $FLAG in
         f ) local _force=1 ;;
-        - ) 
+        - )
             case ${OPTARG} in
                 "no-tail"*) no_tail=1
               ;;
@@ -315,6 +315,7 @@ case "${COMMAND}" in
       fi
       docker-compose \
         --log-level ERROR up \
+        --build \
         -d webserver
       logs webserver
     ;;
@@ -347,10 +348,10 @@ case "${COMMAND}" in
         -v
     ;;
   build)
-      docker build $(initDockerBuildArgs) -t von-network-base .
+      docker build $(initDockerBuildArgs) -t von-network-base -f docker/Dockerfile.node .
     ;;
   rebuild)
-      docker build --no-cache $(initDockerBuildArgs) -t von-network-base .
+      docker build $(initDockerBuildArgs) --no-cache -t von-network-base -f docker/Dockerfile.node .
     ;;
   dockerhost)
       echo -e \\n"DockerHost: ${DOCKERHOST}"\\n

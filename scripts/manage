@@ -67,7 +67,7 @@ function init-pool () {
 }
 
 function start-client () {
-  ./scripts/start_client.sh "${@}"
+  indy-cli "${@}"
 }
 
 function indy-cli() {
