@@ -6,19 +6,17 @@ import os
 import tempfile
 
 from datetime import date, datetime
-from enum import IntEnum
 from hashlib import sha256
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, Union
 
 import aiohttp
 import aiosqlite
 import base58
-import nacl.encoding
 import nacl.signing
 
 import indy_vdr
-from indy_vdr import ledger, Pool, VdrError
+from indy_vdr import ledger, LedgerType, Pool, VdrError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +57,14 @@ INDY_ROLE_TYPES = {"0": "TRUSTEE", "2": "STEWARD", "100": "TGB", "101": "ENDORSE
 
 DEFAULT_PROTOCOL = 2
 
+
+def env_bool(param: str, defval=None) -> bool:
+    val = os.getenv(param, defval)
+    return bool(val and val != "0" and val.lower() != "false")
+
+
+DISABLE_CACHE = env_bool("DISABLE_CACHE", False)
+
 # Sets the maximum number of transactions to fetch at a time.
 MAX_FETCH = int(os.getenv("MAX_FETCH", "50000"))
 
@@ -71,12 +77,7 @@ GENESIS_VERIFIED = False
 
 LEDGER_SEED = os.getenv("LEDGER_SEED")
 
-REGISTER_NEW_DIDS = os.getenv("REGISTER_NEW_DIDS", False)
-REGISTER_NEW_DIDS = bool(
-    REGISTER_NEW_DIDS
-    and REGISTER_NEW_DIDS != "0"
-    and REGISTER_NEW_DIDS.lower() != "false"
-)
+REGISTER_NEW_DIDS = env_bool("REGISTER_NEW_DIDS", False)
 
 AML_CONFIG = os.getenv("AML_CONFIG_FILE", "/home/indy/config/aml.json")
 TAA_CONFIG = os.getenv("TAA_CONFIG_FILE", "/home/indy/config/taa.json")
@@ -146,21 +147,6 @@ def seed_as_bytes(seed):
     return seed.encode("ascii")
 
 
-class LedgerType(IntEnum):
-    POOL = 0
-    DOMAIN = 1
-    CONFIG = 2
-
-    @staticmethod
-    def for_value(value):
-        if isinstance(value, str):
-            if value in "012":
-                value = int(value)
-            else:
-                return LedgerType[value.upper()]
-        return LedgerType(value)
-
-
 class AnchorException(Exception):
     pass
 
@@ -175,6 +161,7 @@ class AnchorHandle:
         self._cache = None
         self._aml_config_path = AML_CONFIG
         self._did = None
+        self._disable_cache = DISABLE_CACHE
         self._init_error = None
         self._pool = None
         self._protocol = protocol or DEFAULT_PROTOCOL
@@ -342,11 +329,11 @@ class AnchorHandle:
         return txns
 
     async def get_latest_seqno(self, ledger_type):
-        ledger_type = LedgerType.for_value(ledger_type)
+        ledger_type = LedgerType.from_value(ledger_type)
         return await self._cache.get_latest_seqno(ledger_type)
 
     async def get_max_seqno(self, ledger_type):
-        ledger_type = LedgerType.for_value(ledger_type)
+        ledger_type = LedgerType.from_value(ledger_type)
         return await self._cache.get_max_seqno(ledger_type)
 
     async def submit_request(
@@ -397,7 +384,7 @@ class AnchorHandle:
         """
         Fetch a transaction by sequence number or transaction ID
         """
-        ledger_type = LedgerType.for_value(ledger_type)
+        ledger_type = LedgerType.from_value(ledger_type)
         if not self.ready:
             raise NotReadyException()
         if not ident:
@@ -438,25 +425,34 @@ class AnchorHandle:
 
     async def get_txn_range(self, ledger_type, start=None, end=None):
         pos = start or 1
-        ledger_type = LedgerType.for_value(ledger_type)
-        rows = await self._cache.get_txn_range(ledger_type, pos, end)
-        if rows:
-            pos += len(rows)
-        fetch_from = pos
-        while not end or fetch_from <= end:
-            row = await self.fetch_tail_txn(ledger_type, end)
-            if row:
-                fetch_from = row[0] + 1
-            else:
-                break
-        if not end or pos <= end:
-            rows.extend(await self._cache.get_txn_range(ledger_type, pos, end))
+        ledger_type = LedgerType.from_value(ledger_type)
+        if self._disable_cache:
+            rows = []
+            for pos in range(start, end):
+                print(pos)
+                row = await self.get_txn(ledger_type, pos, False)
+                if not row:
+                    break
+                rows.append(row)
+        else:
+            rows = await self._cache.get_txn_range(ledger_type, pos, end)
+            if rows:
+                pos += len(rows)
+            fetch_from = pos
+            while not end or fetch_from <= end:
+                row = await self.fetch_tail_txn(ledger_type, end)
+                if row:
+                    fetch_from = row[0] + 1
+                else:
+                    break
+            if not end or pos <= end:
+                rows.extend(await self._cache.get_txn_range(ledger_type, pos, end))
         return rows
 
     async def get_txn_search(
         self, ledger_type, query, txn_type=None, limit=-1, offset=0
     ):
-        ledger_type = LedgerType.for_value(ledger_type)
+        ledger_type = LedgerType.from_value(ledger_type)
         if txn_type == "":
             txn_type = None
         await self.sync_ledger_cache(ledger_type)
@@ -494,14 +490,14 @@ class AnchorHandle:
     async def init_cache(self):
         LOGGER.info("Syncing ledger cache...")
         for ledger_type in LedgerType:
-            await self.sync_ledger_cache(ledger_type, True)
+            await self.sync_ledger_cache(ledger_type, not self._disable_cache)
         LOGGER.info("Finished sync")
         asyncio.get_event_loop().create_task(self.maintain_cache())
 
     async def maintain_cache(self):
         while True:
             for ledger_type in LedgerType:
-                done = await self.update_ledger_cache(ledger_type)
+                _ = await self.update_ledger_cache(ledger_type)
             await asyncio.sleep(RESYNC_TIME)
 
     async def update_ledger_cache(self, ledger_type: LedgerType):
@@ -527,11 +523,11 @@ class AnchorHandle:
         async with self._sync_lock:
             await self._cache.reset()
 
-    async def sync_ledger_cache(self, ledger_type: LedgerType, wait=False):
+    async def sync_ledger_cache(self, ledger_type: LedgerType, wait: bool = False):
         done = False
         fetched = 0
         try:
-            locked = await asyncio.wait_for(
+            _ = await asyncio.wait_for(
                 self._sync_lock.acquire(), None if wait else 0.01
             )
         except asyncio.TimeoutError:
@@ -539,33 +535,44 @@ class AnchorHandle:
             return False
         self._syncing = True
         try:
-            latest = await self._cache.get_latest_seqno(ledger_type)
-            if latest:
-                txn = await self.get_txn(ledger_type, latest, False)
-                cache_txn = await self._cache.get_txn(ledger_type, latest)
-                if (
-                    not cache_txn
-                    or not txn
-                    or not self.compare_txns(
-                        json.loads(cache_txn[3]), json.loads(txn[3])
-                    )
-                ):
-                    await self._cache.reset()
-            while not done:
-                row = await self.fetch_tail_txn(ledger_type)
-                if row:
-                    latest = row[0]
-                    fetched += 1
-                    if MAX_FETCH > 0 and fetched >= MAX_FETCH:
-                        LOGGER.debug(
-                            "%s ledger fetched the maximum number of transaction(s); "
-                            + "MAX_FETCH set to %s",
-                            ledger_type.name,
-                            fetched,
+            if self._disable_cache:
+                exist = await self._cache.get_max_seqno(ledger_type)
+                print(f"sync {exist}")
+                txn = await self.get_txn(ledger_type, exist or 1, False)
+                if txn:
+                    await self._cache.update_existent(ledger_type, txn[3])
+                elif exist:
+                    await self._cache.reset()  # ledger was reset
+                done = True
+            else:
+                latest = await self._cache.get_latest_seqno(ledger_type)
+                if latest:
+                    txn = await self.get_txn(ledger_type, latest, False)
+                    cache_txn = await self._cache.get_txn(ledger_type, latest)
+                    if (
+                        not cache_txn
+                        or not txn
+                        or not self.compare_txns(
+                            json.loads(cache_txn[3]), json.loads(txn[3])
                         )
+                    ):
+                        await self._cache.reset()  # ledger was reset
+            if not self._disable_cache:
+                while not done:
+                    row = await self.fetch_tail_txn(ledger_type)
+                    if row:
+                        latest = row[0]
+                        fetched += 1
+                        if MAX_FETCH > 0 and fetched >= MAX_FETCH:
+                            LOGGER.debug(
+                                "%s ledger fetched the maximum number "
+                                "of transaction(s); MAX_FETCH set to %s",
+                                ledger_type.name,
+                                fetched,
+                            )
+                            done = True
+                    else:
                         done = True
-                else:
-                    done = True
         except AnchorException:
             LOGGER.exception("Error syncing ledger cache:")
         finally:
@@ -622,8 +629,8 @@ class AnchorHandle:
         }
 
 
-def txn_extract_terms(txn_json):
-    data = json.loads(txn_json)
+def txn_extract_terms(txn: Union[str, dict]):
+    data = json.loads(txn) if isinstance(txn, str) else txn
     result = {}
     txntype = None
     ledger_size = None
@@ -888,7 +895,13 @@ class LedgerCache:
         )
         if latest:
             await self.set_latest(ledger_type, seq_no)
+        if latest or ledger_size is not None:
             await self.set_existent(ledger_type, ledger_size or seq_no)
+
+    async def update_existent(self, ledger_type: LedgerType, value: str):
+        txn_type, terms, ledger_size = txn_extract_terms(value)
+        if ledger_size is not None:
+            await self.set_existent(ledger_type, ledger_size)
 
     async def set_latest(self, ledger_type: LedgerType, seq_no):
         await self.perform(
