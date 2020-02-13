@@ -15,7 +15,7 @@ import base58
 import nacl.signing
 
 import indy_vdr
-from indy_vdr import ledger, LedgerType, Pool, VdrError, VdrErrorCode
+from indy_vdr import ledger, open_pool, LedgerType, VdrError, VdrErrorCode
 
 LOGGER = logging.getLogger(__name__)
 
@@ -182,9 +182,8 @@ class AnchorHandle:
                 genesis = await resolve_genesis_file()
                 LOGGER.info("Connecting to ledger pool")
                 indy_vdr.set_protocol_version(self._protocol)
-                self._pool = Pool(genesis_path=genesis)
-                status = await self._pool.refresh()
-                LOGGER.info("Finished pool refresh: %s", status)
+                self._pool = await open_pool(transactions_path=genesis)
+                LOGGER.info("Finished pool refresh: %s", self._pool.last_status)
             except VdrError as e:
                 if e.code == VdrErrorCode.POOL_TIMEOUT and attempts < 5:
                     LOGGER.info("Pool timeout occurred, waiting to retry")
