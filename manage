@@ -295,6 +295,12 @@ shift || COMMAND=usage
 case "${COMMAND}" in
   start|up)
       initEnv "$@"
+      if [ ! -f config/genesis.txn ]; then
+        echo "Genesis transaction file not found, creating..."
+        docker run --rm -e "DOCKERHOST=${DOCKERHOST}" -e "IP=${IP}" -e "IPS=${IPS}" \
+          -v /$(pwd)/config:/home/indy/config \
+          von-network-base scripts/init_genesis.sh
+      fi
       docker-compose \
         --log-level ERROR up \
         -d webserver node1 node2 node3 node4
@@ -348,9 +354,11 @@ case "${COMMAND}" in
         -v
     ;;
   build)
+      docker-compose build webserver
       docker build $(initDockerBuildArgs) -t von-network-base -f docker/Dockerfile.node .
     ;;
   rebuild)
+      docker-compose build webserver
       docker build $(initDockerBuildArgs) --no-cache -t von-network-base -f docker/Dockerfile.node .
     ;;
   dockerhost)

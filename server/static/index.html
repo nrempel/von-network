@@ -271,7 +271,7 @@
                     type="text"
                     name="did"
                     v-model="reg_info.did"
-                    :required="reg_info.reg_seed"
+                    :required="!reg_info.reg_seed"
                   />
                 </div>
                 <div class="form-group" v-if="! reg_info.reg_seed">

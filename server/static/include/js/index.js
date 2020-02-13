@@ -74,7 +74,12 @@ var app = new Vue({
             info = node.Node_info,
             result = {};
           if (!info) {
-            formatted.rows.push({ name: node.name, error: node.error });
+            formatted.rows.push({
+              name: node.name,
+              error: node.error,
+              dash_array: 339.292,
+              dash_offset: 339.292
+            });
             continue;
           }
 

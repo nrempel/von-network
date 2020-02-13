@@ -45,8 +45,8 @@ services:
     ports:
       - ${WEB_SERVER_HOST_PORT:-9000}:8000
     volumes:
-      - ./config:/home/indy/config
-      - ./server:/home/indy/server
+      - ./config:/home/indy/config:ro
+      - ./server:/home/indy/server:ro
 
   #
   # Synchronization test

@@ -13,7 +13,7 @@ from plenum.common.ledger import Ledger
 from storage.helper import initHashStore
 
 from indy_common.config_util import getConfig
-from indy_common.config_helper import ConfigHelper, NodeConfigHelper
+from indy_common.config_helper import NodeConfigHelper
 
 logging.root.handlers = []
 logger = logging.getLogger()
@@ -22,30 +22,49 @@ logger.disabled = True
 
 
 def read_args():
-    parser = argparse.ArgumentParser(
-        description="Read ledger transactions")
+    parser = argparse.ArgumentParser(description="Read ledger transactions")
 
-    parser.add_argument('--type', required=True,
-                        help='Ledger type (pool, domain, config)')
     parser.add_argument(
-        '--frm',
+        "--type", required=True, help="Ledger type (pool, domain, config)"
+    )
+    parser.add_argument(
+        "--frm",
         required=False,
         default=None,
-        help="read all transactions starting from (beginning by default)")
-    parser.add_argument('--to', required=False, default=100,
-                        help="read all transactions till (100 by default)")
-    parser.add_argument('--seq_no', required=False,
-                        help="read a particular transaction")
-    parser.add_argument('--count', required=False, action='store_true',
-                        help="returns the number of txns in the given ledger")
-    parser.add_argument('--node_name', required=False, help="Node's name")
-    parser.add_argument('--client_name', required=False, help="Client's name")
-    parser.add_argument('--serializer', required=False, default='json',
-                        help="How to represent the data (json by default)")
-    parser.add_argument('--network', required=False, type=str,
-                        help="Network name to read ledger from")
-    parser.add_argument('--base_dir', required=False, type=str,
-                        help="Specifify a directory to read from")
+        help="read all transactions starting from (beginning by default)",
+    )
+    parser.add_argument(
+        "--to",
+        required=False,
+        default=100,
+        help="read all transactions till (100 by default)",
+    )
+    parser.add_argument(
+        "--seq_no", required=False, help="read a particular transaction"
+    )
+    parser.add_argument(
+        "--count",
+        required=False,
+        action="store_true",
+        help="returns the number of txns in the given ledger",
+    )
+    parser.add_argument("--node_name", required=False, help="Node's name")
+    parser.add_argument("--client_name", required=False, help="Client's name")
+    parser.add_argument(
+        "--serializer",
+        required=False,
+        default="json",
+        help="How to represent the data (json by default)",
+    )
+    parser.add_argument(
+        "--network", required=False, type=str, help="Network name to read ledger from"
+    )
+    parser.add_argument(
+        "--base_dir",
+        required=False,
+        type=str,
+        help="Specifify a directory to read from",
+    )
 
     return parser.parse_args()
 
@@ -63,22 +82,25 @@ def get_ledger_dir(node_name, client_name, network, base_dir):
             config_helper = NodeConfigHelper(node_name, config)
             ledger_data_dir = config_helper.ledger_dir
         else:
-            ledger_data_dir = os.path.join(config.CLI_BASE_DIR, _network,
-                                           config.clientDataDir, client_name)
+            ledger_data_dir = os.path.join(
+                config.CLI_BASE_DIR, _network, config.clientDataDir, client_name
+            )
         if not os.path.isdir(ledger_data_dir):
-            print("Specified Node or Client folder not found: {}".format(
-                ledger_data_dir))
+            print(
+                "Specified Node or Client folder not found: {}".format(ledger_data_dir)
+            )
             exit()
     else:
 
         if not base_dir:
             base_dir = config.CLI_BASE_DIR if client_name else config.baseDir
-        data_dir = config.clientDataDir if client_name else 'data'
+        data_dir = config.clientDataDir if client_name else "data"
         ledger_data_dir = os.path.join(base_dir, _network, data_dir)
 
         if not os.path.exists(ledger_data_dir):
-            print("Can not find the directory with the ledger: {}".format(
-                ledger_data_dir))
+            print(
+                "Can not find the directory with the ledger: {}".format(ledger_data_dir)
+            )
             exit()
 
         dirs = os.listdir(ledger_data_dir)
@@ -91,23 +113,27 @@ def get_ledger(type_, ledger_data_dir):
     config = getConfig()
 
     ledger_name = None
-    if type_ == 'pool':
+    if type_ == "pool":
         ledger_name = config.poolTransactionsFile
-    elif type_ == 'domain':
+    elif type_ == "domain":
         ledger_name = config.domainTransactionsFile
-    elif type_ == 'config':
+    elif type_ == "config":
         ledger_name = config.configTransactionsFile
     else:
         print("Unknown ledger type: {}".format(type_))
         exit()
 
     hash_store = initHashStore(ledger_data_dir, type_, config)
-    return Ledger(CompactMerkleTree(hashStore=hash_store), dataDir=ledger_data_dir, fileName=ledger_name)
+    return Ledger(
+        CompactMerkleTree(hashStore=hash_store),
+        dataDir=ledger_data_dir,
+        fileName=ledger_name,
+    )
 
 
 def print_txns(ledger, args):
     serializer = None
-    if args.serializer == 'json':
+    if args.serializer == "json":
         serializer = JsonSerializer()
     else:
         print("Unknown serializer for output: {}".format(args.serializer))
@@ -133,7 +159,7 @@ def print_by_seq_no(ledger, seq_no, serializer):
     try:
         txn = ledger.getBySeqNo(seq_no)
     except KeyError:
-        print('No transactions found for seq_no={}'.format(seq_no))
+        print("No transactions found for seq_no={}".format(seq_no))
         return
     txn = serializer.serialize(txn, toBytes=False)
     print(txn)
@@ -153,22 +179,20 @@ def print_all(ledger, serializer):
 
 
 def make_copy_of_ledger(data_dir):
-    read_copy_data_dir = data_dir + '-read-copy'
+    read_copy_data_dir = data_dir + "-read-copy"
     if os.path.exists(read_copy_data_dir):
         shutil.rmtree(read_copy_data_dir)
     shutil.copytree(data_dir, read_copy_data_dir)
     return read_copy_data_dir
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = read_args()
 
     # TODO: works well only for small ledgers,
     ledger_data_dir = get_ledger_dir(
-        args.node_name,
-        args.client_name,
-        args.network,
-        args.base_dir)
+        args.node_name, args.client_name, args.network, args.base_dir
+    )
 
     read_copy_ledger_data_dir = None
     try:

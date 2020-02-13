@@ -144,3 +144,4 @@ Pipfile
 # Custom TAA
 config/aml.json
 config/taa.json
+config/genesis.txn

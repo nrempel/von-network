@@ -5,8 +5,7 @@ import logging
 import os
 import tempfile
 
-from datetime import date, datetime
-from hashlib import sha256
+from datetime import datetime
 from pathlib import Path
 from typing import Sequence, Union
 
@@ -16,7 +15,7 @@ import base58
 import nacl.signing
 
 import indy_vdr
-from indy_vdr import ledger, LedgerType, Pool, VdrError
+from indy_vdr import ledger, LedgerType, Pool, VdrError, VdrErrorCode
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,7 +70,7 @@ MAX_FETCH = int(os.getenv("MAX_FETCH", "50000"))
 # Sets the time between transaction fetches (updates); in seconds.
 RESYNC_TIME = int(os.getenv("RESYNC_TIME", "120"))
 
-GENESIS_FILE = os.getenv("GENESIS_FILE") or "/home/indy/genesis.txn"
+GENESIS_FILE = os.getenv("GENESIS_FILE") or "/home/indy/config/genesis.txn"
 GENESIS_URL = os.getenv("GENESIS_URL")
 GENESIS_VERIFIED = False
 
@@ -120,7 +119,7 @@ async def resolve_genesis_file():
 
     if not GENESIS_VERIFIED:
         if not GENESIS_URL and GENESIS_FILE and Path(GENESIS_FILE).exists():
-            LOGGER.info("Genesis file already exists: %s", GENESIS_FILE)
+            LOGGER.info("Genesis file found: %s", GENESIS_FILE)
         elif GENESIS_URL:
             f = tempfile.NamedTemporaryFile(mode="w+b", delete=False)
             GENESIS_FILE = f.name
@@ -177,13 +176,24 @@ class AnchorHandle:
 
     async def _open_pool(self):
         self._pool = None
-        try:
-            indy_vdr.set_protocol_version(self._protocol)
-            self._pool = Pool(genesis_path=await resolve_genesis_file())
-            status = await self._pool.refresh()
-            LOGGER.info("Finished pool refresh: %s", status)
-        except VdrError as e:
-            raise AnchorException("Error opening pool ledger connection") from e
+        attempts = 0
+        while True:
+            try:
+                genesis = await resolve_genesis_file()
+                LOGGER.info("Connecting to ledger pool")
+                indy_vdr.set_protocol_version(self._protocol)
+                self._pool = Pool(genesis_path=genesis)
+                status = await self._pool.refresh()
+                LOGGER.info("Finished pool refresh: %s", status)
+            except VdrError as e:
+                if e.code == VdrErrorCode.POOL_TIMEOUT and attempts < 5:
+                    LOGGER.info("Pool timeout occurred, waiting to retry")
+                    attempts += 1
+                    await asyncio.sleep(10)
+                    continue
+                else:
+                    raise AnchorException("Error opening pool ledger connection") from e
+            break
 
     async def _register_txn_agreement(self):
         aml_config = None
@@ -219,6 +229,7 @@ class AnchorHandle:
 
         if aml_config:
             if not aml_found or aml_found["version"] != aml_config["version"]:
+                LOGGER.info("AML not found or version mismatch, publishing")
                 aml_body = json.dumps(aml_config["aml"])
                 set_aml_req = ledger.build_acceptance_mechanisms_request(
                     self._did,
@@ -232,38 +243,29 @@ class AnchorHandle:
             else:
                 LOGGER.info("AML already published: %s", aml_config["version"])
 
-        taa_plaintext = None
         get_taa_req = ledger.build_get_txn_author_agreement_request(self._did, None)
         response = await self.submit_request(get_taa_req, True)
         taa_found = response["data"]
-        taa_plaintext = (
-            taa_found
-            and taa_found["text"]
-            and (taa_found["version"] + taa_found["text"])
-        )
 
         if taa_config:
             if not taa_found or taa_found["version"] != taa_config["version"]:
+                LOGGER.info("TAA not found or version mismatch, publishing")
+                taa_extra = {}
+                if "ratification_ts" in taa_config:
+                    taa_extra["ratification_ts"] = taa_config["ratification_ts"]
+                    taa_extra["retirement_ts"] = taa_config.get("retirement_ts")
                 set_taa_req = ledger.build_txn_author_agreement_request(
-                    self._did, taa_config["text"], taa_config["version"]
+                    self._did, taa_config["text"], taa_config["version"], **taa_extra
                 )
                 await self.submit_request(set_taa_req, True)
                 LOGGER.info("Published TAA: %s", taa_config["version"])
-                taa_plaintext = taa_config["text"] and (
-                    taa_config["version"] + taa_config["text"]
-                )
             else:
                 LOGGER.info("TAA already published: %s", taa_config["version"])
 
-        if aml_methods and taa_plaintext:
-            rough_time = int(
-                datetime.combine(date.today(), datetime.min.time()).timestamp()
+        if aml_methods and taa_config:
+            self._taa_accept = ledger.prepare_taa_acceptance(
+                taa_config["text"], taa_config["version"], None, next(iter(aml_methods))
             )
-            self._taa_accept = {
-                "taaDigest": sha256(taa_plaintext.encode("utf-8")).digest().hex(),
-                "mechanism": next(iter(aml_methods)),
-                "time": rough_time,
-            }
 
     async def open(self):
         try:
@@ -347,8 +349,8 @@ class AnchorHandle:
             if signed or as_action:
                 if not self._did:
                     raise AnchorException("Cannot sign request: no DID")
-                # if apply_taa and self._taa_accept:
-                #     req["taaAcceptance"] = self._taa_accept
+                if apply_taa and self._taa_accept:
+                    req.set_taa_acceptance(self._taa_accept)
                 key = nacl.signing.SigningKey(self._seed)
                 signed = key.sign(req.signature_input)
                 req.set_signature(signed.signature)
@@ -429,7 +431,6 @@ class AnchorHandle:
         if self._disable_cache:
             rows = []
             for pos in range(start, end):
-                print(pos)
                 row = await self.get_txn(ledger_type, pos, False)
                 if not row:
                     break
@@ -607,14 +608,18 @@ class AnchorHandle:
 
         ret = []
         for node in node_aliases:
-            reply = json.loads(node_data[node])
-            if "result" in reply:
-                data = reply["result"]["data"]
-                data["Node_info"]["Name"] = node
-            elif "reason" in reply:
-                data = {"name": node, "error": reply["reason"]}
+            try:
+                reply = json.loads(node_data[node])
+            except json.JSONDecodeError:
+                data = {"name": node, "error": node_data[node]}  # likely 'timeout'
             else:
-                data = {"name": node, "error": "unknown error"}
+                if "result" in reply:
+                    data = reply["result"]["data"]
+                    data["Node_info"]["Name"] = node
+                elif "reason" in reply:
+                    data = {"name": node, "error": reply["reason"]}
+                else:
+                    data = {"name": node, "error": "unknown error"}
             ret.append(data)
         return ret
 
