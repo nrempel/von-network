@@ -262,7 +262,7 @@ class AnchorHandle:
                 LOGGER.info("TAA already published: %s", taa_config["version"])
 
         if aml_methods and taa_config:
-            self._taa_accept = ledger.prepare_taa_acceptance(
+            self._taa_accept = ledger.prepare_txn_author_agreement_acceptance(
                 taa_config["text"], taa_config["version"], None, next(iter(aml_methods))
             )
 
@@ -349,7 +349,7 @@ class AnchorHandle:
                 if not self._did:
                     raise AnchorException("Cannot sign request: no DID")
                 if apply_taa and self._taa_accept:
-                    req.set_taa_acceptance(self._taa_accept)
+                    req.set_txn_author_agreement_acceptance(self._taa_accept)
                 key = nacl.signing.SigningKey(self._seed)
                 signed = key.sign(req.signature_input)
                 req.set_signature(signed.signature)
