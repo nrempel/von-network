@@ -196,6 +196,8 @@ function initEnv() {
   fi
   export IP="$IP" IPS="$IPS"
 
+  export LEDGER_SEED=${LEDGER_SEED}
+
   export LOG_LEVEL=${LOG_LEVEL:-info}
   export RUST_LOG=${RUST_LOG:-warning}
 }
@@ -295,6 +297,7 @@ shift || COMMAND=usage
 case "${COMMAND}" in
   start|up)
       initEnv "$@"
+      export LEDGER_SEED=${LEDGER_SEED:-000000000000000000000000Trustee1}
       if [ ! -f config/genesis.txn ]; then
         echo "Genesis transaction file not found, creating..."
         docker run --rm -e "DOCKERHOST=${DOCKERHOST}" -e "IP=${IP}" -e "IPS=${IPS}" \
@@ -316,9 +319,6 @@ case "${COMMAND}" in
     ;;
   start-web)
       initEnv "$@"
-      if [ -z "$LEDGER_SEED" ]; then
-        export ANONYMOUS=1
-      fi
       docker-compose \
         --log-level ERROR up \
         --build \

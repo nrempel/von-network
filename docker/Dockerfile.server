@@ -1,4 +1,4 @@
-FROM indy-vdr-test-python
+FROM bcgovimages/von-image:next-1
 
 ENV LOG_LEVEL ${LOG_LEVEL:-info}
 ENV RUST_LOG ${RUST_LOG:-warning}
