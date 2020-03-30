@@ -196,6 +196,7 @@ function initEnv() {
   fi
   export IP="$IP" IPS="$IPS"
 
+  export DISABLE_CACHE=${DISABLE_CACHE}
   export LEDGER_SEED=${LEDGER_SEED}
 
   export LOG_LEVEL=${LOG_LEVEL:-info}

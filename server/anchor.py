@@ -19,6 +19,7 @@ from indy_vdr import ledger, open_pool, LedgerType, VdrError, VdrErrorCode
 
 LOGGER = logging.getLogger(__name__)
 
+
 INDY_TXN_TYPES = {
     "0": "NODE",
     "1": "NYM",
@@ -60,6 +61,40 @@ DEFAULT_PROTOCOL = 2
 def env_bool(param: str, defval=None) -> bool:
     val = os.getenv(param, defval)
     return bool(val and val != "0" and val.lower() != "false")
+
+
+def format_validator_info(node_data):
+    node_aliases = list(node_data.keys())
+    node_aliases.sort()
+
+    ret = []
+    for node in node_aliases:
+        try:
+            reply = json.loads(node_data[node])
+        except json.JSONDecodeError:
+            data = {"name": node, "error": node_data[node]}  # likely 'timeout'
+        else:
+            if "result" in reply:
+                data = reply["result"]["data"]
+                data["Node_info"]["Name"] = node
+            elif "reason" in reply:
+                data = {"name": node, "error": reply["reason"]}
+            else:
+                data = {"name": node, "error": "unknown error"}
+        ret.append(data)
+    return ret
+
+
+async def run_thread(fn, *args):
+    return await asyncio.get_event_loop().run_in_executor(None, fn, *args)
+
+
+def nacl_seed_to_did(seed):
+    seed = seed_as_bytes(seed)
+    vk = bytes(nacl.signing.SigningKey(seed).verify_key)
+    did = base58.b58encode(vk[:16]).decode("ascii")
+    verkey = base58.b58encode(vk).decode("ascii")
+    return (did, verkey)
 
 
 DISABLE_CACHE = env_bool("DISABLE_CACHE", False)
@@ -157,22 +192,22 @@ class NotReadyException(AnchorException):
 class AnchorHandle:
     def __init__(self, protocol: str = None):
         self._anonymous = not LEDGER_SEED
-        self._cache = None
-        self._aml_config_path = AML_CONFIG
-        self._did = None
+        self._cache: LedgerCache = None
+        self._aml_config_path: str = AML_CONFIG
+        self._did: str = None
         self._disable_cache = DISABLE_CACHE
-        self._init_error = None
-        self._pool = None
+        self._init_error: str = None
+        self._pool: indy_vdr.Pool = None
         self._protocol = protocol or DEFAULT_PROTOCOL
         self._ready = False
-        self._ledger_lock = None
-        self._register_dids = REGISTER_NEW_DIDS and LEDGER_SEED
+        self._ledger_lock: asyncio.Lock = None
+        self._register_dids = bool(REGISTER_NEW_DIDS and LEDGER_SEED)
         self._seed = seed_as_bytes(LEDGER_SEED) if LEDGER_SEED else None
-        self._sync_lock = None
+        self._sync_lock: asyncio.Lock = None
         self._syncing = False
-        self._taa_accept = None
+        self._taa_accept: str = None
         self._taa_config_path = TAA_CONFIG
-        self._verkey = None
+        self._verkey: str = None
 
     async def _open_pool(self):
         self._pool = None
@@ -346,13 +381,7 @@ class AnchorHandle:
     ):
         try:
             if signed or as_action:
-                if not self._did:
-                    raise AnchorException("Cannot sign request: no DID")
-                if apply_taa and self._taa_accept:
-                    req.set_txn_author_agreement_acceptance(self._taa_accept)
-                key = nacl.signing.SigningKey(self._seed)
-                signed = key.sign(req.signature_input)
-                req.set_signature(signed.signature)
+                await run_thread(self.sign_request, req, apply_taa)
             if as_action:
                 resp = await self._pool.submit_action(req)
             else:
@@ -361,6 +390,16 @@ class AnchorHandle:
             raise AnchorException("Error submitting ledger transaction request") from e
 
         return resp
+
+    def sign_request(self, req: ledger.Request, apply_taa: bool = True):
+        if not self._did:
+            raise AnchorException("Cannot sign request: no DID")
+        if apply_taa and self._taa_accept:
+            req.set_txn_author_agreement_acceptance(self._taa_accept)
+        key = nacl.signing.SigningKey(self._seed)
+        signed = key.sign(req.signature_input)
+        req.set_signature(signed.signature)
+        return req
 
     async def get_nym(self, did: str):
         """
@@ -481,17 +520,13 @@ class AnchorHandle:
         """
         Resolve a DID and verkey from a seed
         """
-        seed = seed_as_bytes(seed)
-        vk = bytes(nacl.signing.SigningKey(seed).verify_key)
-        did = base58.b58encode(vk[:16]).decode("ascii")
-        verkey = base58.b58encode(vk).decode("ascii")
-        return (did, verkey)
+        return await run_thread(nacl_seed_to_did, seed)
 
     async def init_cache(self):
-        LOGGER.info("Syncing ledger cache...")
+        LOGGER.info("Init ledger cache...")
         for ledger_type in LedgerType:
             await self.sync_ledger_cache(ledger_type, not self._disable_cache)
-        LOGGER.info("Finished sync")
+        LOGGER.info("Finished cache init")
         asyncio.get_event_loop().create_task(self.maintain_cache())
 
     async def maintain_cache(self):
@@ -501,12 +536,12 @@ class AnchorHandle:
             await asyncio.sleep(RESYNC_TIME)
 
     async def update_ledger_cache(self, ledger_type: LedgerType):
-        LOGGER.debug("Resyncing ledger cache: %s", ledger_type.name)
+        LOGGER.debug("Updating ledger cache: %s", ledger_type.name)
         try:
             await self.sync_ledger_cache(ledger_type)
         except asyncio.TimeoutError:
             pass
-        LOGGER.debug("Finished resync")
+        LOGGER.debug("Finished cache update")
 
     def compare_txns(self, txnA: dict, txnB: dict) -> bool:
         match = True
@@ -536,8 +571,8 @@ class AnchorHandle:
         self._syncing = True
         try:
             if self._disable_cache:
+                LOGGER.debug(f"Fetch transaction count: {ledger_type}")
                 exist = await self._cache.get_max_seqno(ledger_type)
-                print(f"sync {exist}")
                 txn = await self.get_txn(ledger_type, exist or 1, False)
                 if txn:
                     await self._cache.update_existent(ledger_type, txn[3])
@@ -602,25 +637,7 @@ class AnchorHandle:
 
         request = ledger.build_get_validator_info_request(self.did)
         node_data = await self.submit_request(request, as_action=True)
-        node_aliases = list(node_data.keys())
-        node_aliases.sort()
-
-        ret = []
-        for node in node_aliases:
-            try:
-                reply = json.loads(node_data[node])
-            except json.JSONDecodeError:
-                data = {"name": node, "error": node_data[node]}  # likely 'timeout'
-            else:
-                if "result" in reply:
-                    data = reply["result"]["data"]
-                    data["Node_info"]["Name"] = node
-                elif "reason" in reply:
-                    data = {"name": node, "error": reply["reason"]}
-                else:
-                    data = {"name": node, "error": "unknown error"}
-            ret.append(data)
-        return ret
+        return format_validator_info(node_data)
 
     @property
     def public_config(self):
