@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,11 @@ import indy_vdr
 from indy_vdr import ledger, open_pool, LedgerType, VdrError, VdrErrorCode
 
 LOGGER = logging.getLogger(__name__)
+
+
+def env_bool(param: str, defval=None) -> bool:
+    val = os.getenv(param, defval)
+    return bool(val and val != "0" and val.lower() != "false")
 
 
 INDY_TXN_TYPES = {
@@ -57,10 +63,26 @@ INDY_ROLE_TYPES = {"0": "TRUSTEE", "2": "STEWARD", "100": "TGB", "101": "ENDORSE
 
 DEFAULT_PROTOCOL = 2
 
+VALIDATOR_INFO_TTLS = 15
 
-def env_bool(param: str, defval=None) -> bool:
-    val = os.getenv(param, defval)
-    return bool(val and val != "0" and val.lower() != "false")
+DISABLE_CACHE = env_bool("DISABLE_CACHE", False)
+
+# Sets the maximum number of transactions to fetch at a time.
+MAX_FETCH = int(os.getenv("MAX_FETCH", "50000"))
+
+# Sets the time between transaction fetches (updates); in seconds.
+RESYNC_TIME = int(os.getenv("RESYNC_TIME", "120"))
+
+GENESIS_FILE = os.getenv("GENESIS_FILE") or "/home/indy/config/genesis.txn"
+GENESIS_URL = os.getenv("GENESIS_URL")
+GENESIS_VERIFIED = False
+
+LEDGER_SEED = os.getenv("LEDGER_SEED")
+
+REGISTER_NEW_DIDS = env_bool("REGISTER_NEW_DIDS", False)
+
+AML_CONFIG = os.getenv("AML_CONFIG_FILE", "/home/indy/config/aml.json")
+TAA_CONFIG = os.getenv("TAA_CONFIG_FILE", "/home/indy/config/taa.json")
 
 
 def format_validator_info(node_data):
@@ -95,26 +117,6 @@ def nacl_seed_to_did(seed):
     did = base58.b58encode(vk[:16]).decode("ascii")
     verkey = base58.b58encode(vk).decode("ascii")
     return (did, verkey)
-
-
-DISABLE_CACHE = env_bool("DISABLE_CACHE", False)
-
-# Sets the maximum number of transactions to fetch at a time.
-MAX_FETCH = int(os.getenv("MAX_FETCH", "50000"))
-
-# Sets the time between transaction fetches (updates); in seconds.
-RESYNC_TIME = int(os.getenv("RESYNC_TIME", "120"))
-
-GENESIS_FILE = os.getenv("GENESIS_FILE") or "/home/indy/config/genesis.txn"
-GENESIS_URL = os.getenv("GENESIS_URL")
-GENESIS_VERIFIED = False
-
-LEDGER_SEED = os.getenv("LEDGER_SEED")
-
-REGISTER_NEW_DIDS = env_bool("REGISTER_NEW_DIDS", False)
-
-AML_CONFIG = os.getenv("AML_CONFIG_FILE", "/home/indy/config/aml.json")
-TAA_CONFIG = os.getenv("TAA_CONFIG_FILE", "/home/indy/config/taa.json")
 
 
 def is_int(val):
@@ -207,6 +209,8 @@ class AnchorHandle:
         self._syncing = False
         self._taa_accept: str = None
         self._taa_config_path = TAA_CONFIG
+        self._validator_info: dict = None
+        self._validator_info_lock: asyncio.Lock() = None
         self._verkey: str = None
 
     async def _open_pool(self):
@@ -323,6 +327,7 @@ class AnchorHandle:
                     raise
             self._ledger_lock = asyncio.Lock()
             self._sync_lock = asyncio.Lock()
+            self._validator_info_lock = asyncio.Lock()
             asyncio.get_event_loop().create_task(self.init_cache())
             self._ready = True
         except Exception as e:
@@ -628,16 +633,29 @@ class AnchorHandle:
                 )
         return done
 
-    async def validator_info(self):
+    async def validator_info(self, reload: bool = False):
         """
         Fetch the status of the validator nodes
         """
         if not self.ready or not self.did:
             raise NotReadyException()
 
-        request = ledger.build_get_validator_info_request(self.did)
-        node_data = await self.submit_request(request, as_action=True)
-        return format_validator_info(node_data)
+        info = None if reload else self.get_recent_validator_info()
+        if not info:
+            async with self._validator_info_lock:
+                # check again in case of a race
+                info = None if reload else self.get_recent_validator_info()
+                if not info:
+                    request = ledger.build_get_validator_info_request(self.did)
+                    node_data = await self.submit_request(request, as_action=True)
+                    result = format_validator_info(node_data)
+                    info = self._validator_info = {"result": result, "ts": time.time()}
+        return info["result"]
+
+    def get_recent_validator_info(self):
+        info = self._validator_info
+        if info and info["ts"] > time.time() - VALIDATOR_INFO_TTLS:
+            return info
 
     @property
     def public_config(self):
