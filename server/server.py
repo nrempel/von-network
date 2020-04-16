@@ -94,7 +94,7 @@ def json_not_ready():
 @ROUTES.get("/status")
 async def status(request):
     status = TRUST_ANCHOR.public_config
-    if status["ready"] and not status["anonymous"] and request.query.get("validators"):
+    if status["ready"] and request.query.get("validators"):
         try:
             status["validators"] = await TRUST_ANCHOR.validator_info()
         except NotReadyException:

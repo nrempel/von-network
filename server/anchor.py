@@ -63,7 +63,7 @@ INDY_ROLE_TYPES = {"0": "TRUSTEE", "2": "STEWARD", "100": "TGB", "101": "ENDORSE
 
 DEFAULT_PROTOCOL = 2
 
-VALIDATOR_INFO_TTLS = 15
+VALIDATOR_INFO_TTLS = 25
 
 DISABLE_CACHE = env_bool("DISABLE_CACHE", False)
 
@@ -85,7 +85,7 @@ AML_CONFIG = os.getenv("AML_CONFIG_FILE", "/home/indy/config/aml.json")
 TAA_CONFIG = os.getenv("TAA_CONFIG_FILE", "/home/indy/config/taa.json")
 
 
-def format_validator_info(node_data):
+def format_validator_info(node_data, from_txn: bool = False):
     node_aliases = list(node_data.keys())
     node_aliases.sort()
 
@@ -97,13 +97,17 @@ def format_validator_info(node_data):
             data = {"name": node, "error": node_data[node]}  # likely 'timeout'
         else:
             if "result" in reply:
-                data = reply["result"]["data"]
-                data["Node_info"]["Name"] = node
+                if from_txn:
+                    data = {"Node_info": {"Name": node}}
+                else:
+                    data = reply["result"]["data"]
+                    data["Node_info"]["Name"] = node
             elif "reason" in reply:
                 data = {"name": node, "error": reply["reason"]}
             else:
                 data = {"name": node, "error": "unknown error"}
         ret.append(data)
+    ret.sort(key=(lambda node: ("error" not in node)))
     return ret
 
 
@@ -385,7 +389,7 @@ class AnchorHandle:
         as_action: bool = False,
     ):
         try:
-            if signed or as_action:
+            if signed or (as_action and self.did):
                 await run_thread(self.sign_request, req, apply_taa)
             if as_action:
                 resp = await self._pool.submit_action(req)
@@ -637,7 +641,7 @@ class AnchorHandle:
         """
         Fetch the status of the validator nodes
         """
-        if not self.ready or not self.did:
+        if not self.ready:
             raise NotReadyException()
 
         info = None if reload else self.get_recent_validator_info()
@@ -646,9 +650,12 @@ class AnchorHandle:
                 # check again in case of a race
                 info = None if reload else self.get_recent_validator_info()
                 if not info:
-                    request = ledger.build_get_validator_info_request(self.did)
+                    if self.did:
+                        request = ledger.build_get_validator_info_request(self.did)
+                    else:
+                        request = ledger.build_get_txn_request(None, 1, 1)
                     node_data = await self.submit_request(request, as_action=True)
-                    result = format_validator_info(node_data)
+                    result = format_validator_info(node_data, not self.did)
                     info = self._validator_info = {"result": result, "ts": time.time()}
         return info["result"]
 

@@ -26,7 +26,7 @@
         <div class="col-main">
           <div
             class="panel panel-info"
-            style="display: none"
+            style="display: none;"
             v-show="init_error"
           >
             <div class="panel-body error">
@@ -37,7 +37,7 @@
           </div>
           <div
             class="panel panel-info"
-            style="display: none"
+            style="display: none;"
             v-show="! ready && ! init_error"
           >
             <div class="panel-body warning not-ready">
@@ -49,8 +49,8 @@
           </div>
           <div
             class="panel panel-default panel-node-status"
-            style="display: none"
-            v-show="ready && ! anonymous"
+            style="display: none;"
+            v-show="ready"
           >
             <div class="panel-heading">
               <h2>
@@ -72,7 +72,7 @@
                     node status.
                   </p>
                 </div>
-                <template v-if="status && status.rows">
+                <template v-if="status && status.rows && status.extended">
                   <div
                     class="panel-body node-status"
                     v-for="row in status.rows"
@@ -143,23 +143,44 @@
                     </div>
                   </div>
                 </template>
+                <template v-if="status && status.rows && !status.extended">
+                  <div
+                    class="panel-body node-status"
+                    v-for="row in status.rows"
+                  >
+                    <span
+                      class="fa fa-check-circle success node-status-icon"
+                      v-if="! row.error"
+                    ></span>
+                    <span
+                      class="fa fa-exclamation-circle error node-status-icon"
+                      v-if="row.error"
+                    ></span>
+                    {{ row.name }}
+                    <span class="node-error error" v-if="row.error"
+                      >{{ row.error }}</span
+                    >
+                  </div>
+                </template>
               </div>
-              <p>
-                View detailed information about the status of the running
-                validator nodes:
-              </p>
-              <p>
-                <a href="/status/text" class="tool"
-                  ><span class="fa fa-chevron-right left"></span>Detailed
-                  Status</a
-                >
-              </p>
+              <template v-if="status && status.extended">
+                <p>
+                  View detailed information about the status of the running
+                  validator nodes:
+                </p>
+                <p>
+                  <a href="/status/text" class="tool"
+                    ><span class="fa fa-chevron-right left"></span>Detailed
+                    Status</a
+                  >
+                </p>
+              </template>
             </div>
           </div>
 
           <div
             class="panel panel-default panel-ledger-status"
-            style="display: none"
+            style="display: none;"
             v-show="ready"
           >
             <div class="panel-heading">
@@ -197,7 +218,7 @@
           </div>
         </div>
 
-        <aside class="col-tools" style="display: none" v-show="ready">
+        <aside class="col-tools" style="display: none;" v-show="ready">
           <div class="panel panel-side connect">
             <div class="panel-heading">
               <h2>
